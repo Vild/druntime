@@ -46,30 +46,54 @@ Tarr _d_arrayctor(Tarr : T[], T)(return scope Tarr to, scope Tarr from) @trusted
     enforceRawArraysConformable("initialization", element_size, vFrom, vTo, false);
 
     size_t i;
-    try
+    scope(failure)
     {
-        for (i = 0; i < to.length; i++)
+        for (; i != 0; --i)
         {
-            auto elem = cast(Unqual!T*)&to[i];
-            // Copy construction is defined as bit copy followed by postblit.
-            memcpy(elem, &from[i], element_size);
-            _postblitRecurse(*elem);
+            _dtor(*cast(Unqual!T*)&to[i - 1]);
         }
     }
-    catch (Exception o)
-    {
-        /* Destroy, in reverse order, what we've constructed so far
-        */
-        while (i--)
-        {
-            auto elem = cast(Unqual!T*)&to[i];
-            destroy(*elem);
-        }
 
-        throw o;
+    for (i = 0; i < to.length; ++i)
+    {
+        /* Here is a weird hack that makes sure that if the postblit function throws it will trigger the `scope(failure)`.
+         * Without this the compiler will optimize away (I think, I have no proof if this is the case) the `scope (failure)`, which is incorrect behaviour. To fix the problem we need to a function call with `i` as a argument.
+         * It _have_ be `i` and cannot be, for example, `&to[i]`. It can be a call to any function, so for example `printf`
+         * will work, but in this case as we don't want to do anything. So here we make a no-op nested function and call it with `i`.
+         */
+        static void fixThrowingBug(size_t i) @nogc @safe {
+            pragma(inline, true);
+        }
+        fixThrowingBug(i);
+
+        // Copy construction is defined as bit copy followed by postblit.
+        memcpy(cast(void*)&to[i], &from[i], element_size);
+        _postblit(*cast(Unqual!T*)&to[i]);
     }
 
     return to;
+}
+
+private void _postblit(T)(ref T t) {
+    static if (is(T == struct) &&
+        __traits(hasMember, T, "__xpostblit") &&
+        // Bugzilla 14746: Check that it's the exact member of T.
+        __traits(isSame, T, __traits(parent, t.__xpostblit)))
+        t.__xpostblit();
+    else static if (__traits(isStaticArray, T))
+        foreach (ref s; t)
+            _postblit(s);
+}
+
+private void _dtor(T)(ref T t) {
+    static if (is(T == struct) &&
+        __traits(hasMember, T, "__xdtor") &&
+        // Bugzilla 14746: Check that it's the exact member of T.
+        __traits(isSame, T, __traits(parent, t.__xdtor)))
+        t.__xdtor();
+    else static if (__traits(isStaticArray, T))
+        foreach (ref s; t)
+            _dtor(s);
 }
 
 @safe unittest
@@ -155,7 +179,7 @@ Tarr _d_arrayctor(Tarr : T[], T)(return scope Tarr to, scope Tarr from) @trusted
  *  purity, and throwabilty checks. To prevent breaking existing code, this function template
  *  is temporarily declared `@trusted` until the implementation can be brought up to modern D expectations.
  */
-void _d_arraysetctor(Tarr : T[], T)(scope Tarr p, scope ref T value) @trusted
+void _d_arraysetctor(Tarr : T[], T)(return scope Tarr p, scope ref T value) @trusted
 {
     pragma(inline, false);
     import core.stdc.string : memcpy;
@@ -163,28 +187,25 @@ void _d_arraysetctor(Tarr : T[], T)(scope Tarr p, scope ref T value) @trusted
     size_t walker;
     auto element_size = T.sizeof;
 
-    try
+    size_t i;
+    scope(failure)
     {
-        foreach (i; 0 .. p.length)
+        for (; i != 0; --i)
         {
-            auto elem = cast(Unqual!T*)&p[walker];
-            // Copy construction is defined as bit copy followed by postblit.
-            memcpy(elem, &value, element_size);
-            _postblitRecurse(*elem);
-            walker++;
+            _dtor(*cast(Unqual!T*)&p[i - 1]);
         }
     }
-    catch (Exception o)
-    {
-        // Destroy, in reverse order, what we've constructed so far
-        while (walker > 0)
-        {
-            walker--;
-            auto elem = cast(Unqual!T*)&p[walker];
-            destroy(*elem);
-        }
 
-        throw o;
+    for (i = 0; i < p.length; ++i)
+    {
+        // For explaination of this see `_d_arrayctor`
+        static void fixThrowingBug(size_t i) @nogc @safe {
+            pragma(inline, true);
+        }
+        fixThrowingBug(i);
+
+        memcpy(cast(void*)&p[i], &value, element_size);
+        _postblit(*cast(Unqual!T*)&p[i]);
     }
 }
 
